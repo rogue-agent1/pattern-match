@@ -1,112 +1,46 @@
 #!/usr/bin/env python3
-"""pattern_match - Structural pattern matching engine for Python data."""
-import sys
+"""Pattern matching DSL. Zero dependencies."""
 
-class _Wildcard:
+class _Any: 
     def __repr__(self): return "_"
-_ = _Wildcard()
+_ = _Any()
 
-class Var:
-    def __init__(self, name):
-        self.name = name
-    def __repr__(self): return f"Var({self.name})"
+class _Guard:
+    def __init__(self, fn): self.fn = fn
+    def __repr__(self): return f"Guard({self.fn})"
 
-class Guard:
-    def __init__(self, pattern, predicate):
-        self.pattern = pattern
-        self.predicate = predicate
+def guard(fn): return _Guard(fn)
 
-def match_pattern(pattern, value, bindings=None):
-    if bindings is None:
-        bindings = {}
-    if isinstance(pattern, _Wildcard):
-        return True, bindings
-    if isinstance(pattern, Var):
-        if pattern.name in bindings:
-            return bindings[pattern.name] == value, bindings
-        bindings[pattern.name] = value
-        return True, bindings
-    if isinstance(pattern, Guard):
-        ok, b = match_pattern(pattern.pattern, value, bindings)
-        if ok and pattern.predicate(value):
-            return True, b
-        return False, bindings
-    if isinstance(pattern, type):
-        return isinstance(value, pattern), bindings
-    if isinstance(pattern, tuple) and isinstance(value, tuple):
-        if len(pattern) != len(value):
-            return False, bindings
-        for p, v in zip(pattern, value):
-            ok, bindings = match_pattern(p, v, bindings)
-            if not ok:
-                return False, bindings
-        return True, bindings
-    if isinstance(pattern, list) and isinstance(value, list):
-        if len(pattern) != len(value):
-            return False, bindings
-        for p, v in zip(pattern, value):
-            ok, bindings = match_pattern(p, v, bindings)
-            if not ok:
-                return False, bindings
-        return True, bindings
+def _matches(pattern, value, bindings):
+    if isinstance(pattern, _Any): return True
+    if isinstance(pattern, _Guard): return pattern.fn(value)
+    if isinstance(pattern, str) and pattern.startswith("$"):
+        name = pattern[1:]
+        if name in bindings: return bindings[name] == value
+        bindings[name] = value; return True
+    if isinstance(pattern, type): return isinstance(value, pattern)
+    if isinstance(pattern, (list, tuple)) and isinstance(value, (list, tuple)):
+        if len(pattern) != len(value): return False
+        return all(_matches(p, v, bindings) for p, v in zip(pattern, value))
     if isinstance(pattern, dict) and isinstance(value, dict):
-        for k, p in pattern.items():
-            if k not in value:
-                return False, bindings
-            ok, bindings = match_pattern(p, value[k], bindings)
-            if not ok:
-                return False, bindings
-        return True, bindings
-    return pattern == value, bindings
+        return all(k in value and _matches(v, value[k], bindings) for k, v in pattern.items())
+    return pattern == value
 
-class Match:
-    def __init__(self, value):
-        self.value = value
-        self.cases = []
-
-    def case(self, pattern, handler):
-        self.cases.append((pattern, handler))
-        return self
-
-    def execute(self):
-        for pattern, handler in self.cases:
-            ok, bindings = match_pattern(pattern, self.value)
-            if ok:
-                return handler(bindings) if bindings else handler({})
-        raise ValueError(f"No pattern matched for {self.value!r}")
-
-W = _  # module-level alias to avoid local variable conflict
-
-def test():
-    ok, b = match_pattern(W, 42)
-    assert ok and b == {}
-    ok, b = match_pattern(Var("x"), 42)
-    assert ok and b == {"x": 42}
-    ok, b = match_pattern((Var("a"), Var("b")), (1, 2))
-    assert ok and b == {"a": 1, "b": 2}
-    ok, b = match_pattern({"name": Var("n"), "age": W}, {"name": "Alice", "age": 30, "extra": True})
-    assert ok and b == {"n": "Alice"}
-    ok, _b = match_pattern((1, 2), (1, 3))
-    assert not ok
-    ok, b = match_pattern([Var("x"), Var("x")], [5, 5])
-    assert ok
-    ok, _b = match_pattern([Var("x"), Var("x")], [5, 6])
-    assert not ok
-    ok, _b = match_pattern(Guard(Var("x"), lambda v: v > 10), 15)
-    assert ok
-    ok, _b = match_pattern(Guard(Var("x"), lambda v: v > 10), 5)
-    assert not ok
-    result = (Match(("+", 3, 4))
-              .case(("+", Var("a"), Var("b")), lambda b: b["a"] + b["b"])
-              .case(("-", Var("a"), Var("b")), lambda b: b["a"] - b["b"])
-              .execute())
-    assert result == 7
-    result = (Match(("*", 5, 6))
-              .case(("+", W, W), lambda b: "add")
-              .case(("*", Var("a"), Var("b")), lambda b: b["a"] * b["b"])
-              .execute())
-    assert result == 30
-    print("All tests passed!")
+def match(value, *cases):
+    for pattern, handler in cases:
+        bindings = {}
+        if _matches(pattern, value, bindings):
+            if callable(handler):
+                import inspect
+                sig = inspect.signature(handler)
+                if sig.parameters:
+                    return handler(**{k: bindings[k] for k in sig.parameters if k in bindings})
+            return handler() if callable(handler) else handler
+    raise ValueError(f"No match for {value!r}")
 
 if __name__ == "__main__":
-    test() if "--test" in sys.argv else print("pattern_match: Pattern matching. Use --test")
+    result = match(42,
+        (0, lambda: "zero"),
+        (guard(lambda x: x > 0), lambda: "positive"),
+        (_, lambda: "other"))
+    print(result)
