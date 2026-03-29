@@ -1,11 +1,8 @@
 # pattern_match
 
-pattern_match - ML/Rust-style pattern matching with exhaustiveness checking.
-
-Zero-dependency, single-file Python CLI.
+pattern_match: Single-file Python CLI tool. Zero dependencies, Python 3.8+.
 
 ## Usage
-
 ```bash
-python3 pattern_match.py
+python3 pattern_match.py --test
 ```

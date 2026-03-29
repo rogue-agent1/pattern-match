@@ -1,120 +1,112 @@
 #!/usr/bin/env python3
-"""pattern_match - ML/Rust-style pattern matching with exhaustiveness checking."""
-import sys, json
-from dataclasses import dataclass
-from typing import Any
+"""pattern_match - Structural pattern matching engine for Python data."""
+import sys
 
-@dataclass
-class Pat:
-    pass
-
-@dataclass
-class PWild(Pat):
+class _Wildcard:
     def __repr__(self): return "_"
+_ = _Wildcard()
 
-@dataclass
-class PVar(Pat):
-    name: str
-    def __repr__(self): return self.name
+class Var:
+    def __init__(self, name):
+        self.name = name
+    def __repr__(self): return f"Var({self.name})"
 
-@dataclass
-class PLit(Pat):
-    value: Any
-    def __repr__(self): return repr(self.value)
+class Guard:
+    def __init__(self, pattern, predicate):
+        self.pattern = pattern
+        self.predicate = predicate
 
-@dataclass
-class PCons(Pat):
-    name: str; args: list
-    def __repr__(self): return f"{self.name}({', '.join(map(str, self.args))})" if self.args else self.name
-
-@dataclass
-class PTuple(Pat):
-    elems: list
-    def __repr__(self): return f"({', '.join(map(str, self.elems))})"
-
-@dataclass
-class POr(Pat):
-    alts: list
-    def __repr__(self): return " | ".join(map(str, self.alts))
-
-class MatchCompiler:
-    def __init__(self, constructors=None):
-        self.constructors = constructors or {}
-    
-    def match_pat(self, pat, value, bindings=None):
-        if bindings is None: bindings = {}
-        if isinstance(pat, PWild): return True, bindings
-        if isinstance(pat, PVar): bindings[pat.name] = value; return True, bindings
-        if isinstance(pat, PLit): return value == pat.value, bindings
-        if isinstance(pat, PCons):
-            if not isinstance(value, tuple) or len(value) < 1: return False, bindings
-            if value[0] != pat.name: return False, bindings
-            args = value[1:] if len(value) > 1 else []
-            if len(args) != len(pat.args): return False, bindings
-            for p, v in zip(pat.args, args):
-                ok, bindings = self.match_pat(p, v, bindings)
-                if not ok: return False, bindings
-            return True, bindings
-        if isinstance(pat, PTuple):
-            if not isinstance(value, tuple) or len(value) != len(pat.elems): return False, bindings
-            for p, v in zip(pat.elems, value):
-                ok, bindings = self.match_pat(p, v, bindings)
-                if not ok: return False, bindings
-            return True, bindings
-        if isinstance(pat, POr):
-            for alt in pat.alts:
-                ok, b = self.match_pat(alt, value, dict(bindings))
-                if ok: return True, b
-            return False, bindings
+def match_pattern(pattern, value, bindings=None):
+    if bindings is None:
+        bindings = {}
+    if isinstance(pattern, _Wildcard):
+        return True, bindings
+    if isinstance(pattern, Var):
+        if pattern.name in bindings:
+            return bindings[pattern.name] == value, bindings
+        bindings[pattern.name] = value
+        return True, bindings
+    if isinstance(pattern, Guard):
+        ok, b = match_pattern(pattern.pattern, value, bindings)
+        if ok and pattern.predicate(value):
+            return True, b
         return False, bindings
-    
-    def match(self, value, arms):
-        for pat, action in arms:
-            ok, bindings = self.match_pat(pat, value)
-            if ok: return action(bindings)
-        raise RuntimeError(f"Non-exhaustive match for {value}")
-    
-    def check_exhaustive(self, type_name, patterns):
-        if any(isinstance(p, (PWild, PVar)) for p in patterns): return True, []
-        cons = self.constructors.get(type_name, [])
-        if not cons: return True, []
-        covered = {p.name for p in patterns if isinstance(p, PCons)}
-        missing = set(cons) - covered
-        return len(missing) == 0, list(missing)
+    if isinstance(pattern, type):
+        return isinstance(value, pattern), bindings
+    if isinstance(pattern, tuple) and isinstance(value, tuple):
+        if len(pattern) != len(value):
+            return False, bindings
+        for p, v in zip(pattern, value):
+            ok, bindings = match_pattern(p, v, bindings)
+            if not ok:
+                return False, bindings
+        return True, bindings
+    if isinstance(pattern, list) and isinstance(value, list):
+        if len(pattern) != len(value):
+            return False, bindings
+        for p, v in zip(pattern, value):
+            ok, bindings = match_pattern(p, v, bindings)
+            if not ok:
+                return False, bindings
+        return True, bindings
+    if isinstance(pattern, dict) and isinstance(value, dict):
+        for k, p in pattern.items():
+            if k not in value:
+                return False, bindings
+            ok, bindings = match_pattern(p, value[k], bindings)
+            if not ok:
+                return False, bindings
+        return True, bindings
+    return pattern == value, bindings
 
-def main():
-    mc = MatchCompiler(constructors={"Option": ["Some", "None"], "Result": ["Ok", "Err"]})
-    
-    print("Pattern matching demo\n")
-    
-    # Match on Option
-    for val in [("Some", 42), ("None",)]:
-        r = mc.match(val, [
-            (PCons("Some", [PVar("x")]), lambda b: f"Got {b['x']}"),
-            (PCons("None", []), lambda b: "Nothing"),
-        ])
-        print(f"  match {val} => {r}")
-    
-    # Tuple matching
-    r = mc.match((1, "hello"), [
-        (PTuple([PLit(1), PVar("s")]), lambda b: f"One and {b['s']}"),
-        (PTuple([PWild(), PWild()]), lambda b: "other"),
-    ])
-    print(f"  match (1, 'hello') => {r}")
-    
-    # Or patterns
-    r = mc.match(("Ok", 200), [
-        (POr([PCons("Ok", [PLit(200)]), PCons("Ok", [PLit(201)])]), lambda b: "success"),
-        (PCons("Ok", [PVar("code")]), lambda b: f"ok({b['code']})"),
-        (PCons("Err", [PVar("e")]), lambda b: f"err({b['e']})"),
-    ])
-    print(f"  match Ok(200) => {r}")
-    
-    # Exhaustiveness
-    exh, missing = mc.check_exhaustive("Option", [PCons("Some", [PWild()])])
-    print(f"\n  Exhaustive? {exh}, missing: {missing}")
-    exh2, m2 = mc.check_exhaustive("Option", [PCons("Some", [PWild()]), PCons("None", [])])
-    print(f"  With None? {exh2}, missing: {m2}")
+class Match:
+    def __init__(self, value):
+        self.value = value
+        self.cases = []
+
+    def case(self, pattern, handler):
+        self.cases.append((pattern, handler))
+        return self
+
+    def execute(self):
+        for pattern, handler in self.cases:
+            ok, bindings = match_pattern(pattern, self.value)
+            if ok:
+                return handler(bindings) if bindings else handler({})
+        raise ValueError(f"No pattern matched for {self.value!r}")
+
+W = _  # module-level alias to avoid local variable conflict
+
+def test():
+    ok, b = match_pattern(W, 42)
+    assert ok and b == {}
+    ok, b = match_pattern(Var("x"), 42)
+    assert ok and b == {"x": 42}
+    ok, b = match_pattern((Var("a"), Var("b")), (1, 2))
+    assert ok and b == {"a": 1, "b": 2}
+    ok, b = match_pattern({"name": Var("n"), "age": W}, {"name": "Alice", "age": 30, "extra": True})
+    assert ok and b == {"n": "Alice"}
+    ok, _b = match_pattern((1, 2), (1, 3))
+    assert not ok
+    ok, b = match_pattern([Var("x"), Var("x")], [5, 5])
+    assert ok
+    ok, _b = match_pattern([Var("x"), Var("x")], [5, 6])
+    assert not ok
+    ok, _b = match_pattern(Guard(Var("x"), lambda v: v > 10), 15)
+    assert ok
+    ok, _b = match_pattern(Guard(Var("x"), lambda v: v > 10), 5)
+    assert not ok
+    result = (Match(("+", 3, 4))
+              .case(("+", Var("a"), Var("b")), lambda b: b["a"] + b["b"])
+              .case(("-", Var("a"), Var("b")), lambda b: b["a"] - b["b"])
+              .execute())
+    assert result == 7
+    result = (Match(("*", 5, 6))
+              .case(("+", W, W), lambda b: "add")
+              .case(("*", Var("a"), Var("b")), lambda b: b["a"] * b["b"])
+              .execute())
+    assert result == 30
+    print("All tests passed!")
 
 if __name__ == "__main__":
-    main()
+    test() if "--test" in sys.argv else print("pattern_match: Pattern matching. Use --test")
